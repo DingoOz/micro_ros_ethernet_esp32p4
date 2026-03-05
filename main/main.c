@@ -92,7 +92,7 @@ static void micro_ros_task(void *arg)
         "pico_publisher");
 
     // Timer: 1 Hz
-    rclc_timer_init_default(&timer, &support, RCL_MS_TO_NS(1000), timer_callback);
+    rclc_timer_init_default2(&timer, &support, RCL_MS_TO_NS(1000), timer_callback, true);
 
     // Subscriptions: /servo_0 .. /servo_3
     char topic_name[16];

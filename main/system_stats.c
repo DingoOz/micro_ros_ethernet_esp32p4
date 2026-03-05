@@ -98,9 +98,12 @@ void system_stats_collect(system_stats_t *stats)
         strncpy(stats->tasks[i].name, task_status[i].pcTaskName, sizeof(stats->tasks[i].name) - 1);
         stats->tasks[i].priority = task_status[i].uxCurrentPriority;
         stats->tasks[i].stack_hwm = task_status[i].usStackHighWaterMark * sizeof(StackType_t);
+#if configTASKLIST_INCLUDE_COREID == 1
         stats->tasks[i].core_id = task_status[i].xCoreID;
-
         if (task_status[i].xCoreID == 0) stats->core0_tasks++;
         else if (task_status[i].xCoreID == 1) stats->core1_tasks++;
+#else
+        stats->tasks[i].core_id = -1;
+#endif
     }
 }

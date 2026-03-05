@@ -18,6 +18,10 @@ idf_component_register(
         json
         freertos
         esp_driver_i2c
-        esp_driver_temperature_sensor
+        esp_driver_tsens
+        spi_flash
         micro_ros_espidf_component
 )
+
+# Allow multiple definitions for 64-bit atomics (rcutils vs newlib)
+target_link_options(${COMPONENT_LIB} INTERFACE -Wl,--allow-multiple-definition)
