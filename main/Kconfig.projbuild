@@ -1,0 +1,69 @@
+menu "micro-ROS ESP32-P4 Configuration"
+
+    config MICRO_ROS_AGENT_IP
+        string "micro-ROS Agent IP"
+        default "192.168.1.241"
+        help
+            IP address of the micro-ROS agent.
+
+    config MICRO_ROS_AGENT_PORT
+        int "micro-ROS Agent Port"
+        default 8888
+        help
+            UDP port of the micro-ROS agent.
+
+    config MICRO_ROS_DOMAIN_ID
+        int "ROS Domain ID"
+        default 30
+        help
+            ROS 2 domain ID for micro-ROS communication.
+
+    config SERVO_I2C_SDA_PIN
+        int "I2C SDA GPIO for PCA9685"
+        default 7
+        help
+            GPIO pin for I2C SDA to PCA9685 servo driver.
+
+    config SERVO_I2C_SCL_PIN
+        int "I2C SCL GPIO for PCA9685"
+        default 8
+        help
+            GPIO pin for I2C SCL to PCA9685 servo driver.
+
+    config SERVO_PCA9685_ADDR
+        hex "PCA9685 I2C Address"
+        default 0x44
+        help
+            I2C address of the PCA9685 servo driver.
+
+    config ETH_MDC_GPIO
+        int "Ethernet MDC GPIO"
+        default 31
+        help
+            GPIO pin for RMII MDC (Management Data Clock).
+
+    config ETH_MDIO_GPIO
+        int "Ethernet MDIO GPIO"
+        default 52
+        help
+            GPIO pin for RMII MDIO (Management Data I/O).
+
+    config ETH_PHY_RST_GPIO
+        int "Ethernet PHY Reset GPIO"
+        default 51
+        help
+            GPIO pin for PHY reset. Set to -1 if not used.
+
+    config ETH_PHY_ADDR
+        int "Ethernet PHY Address"
+        default 1
+        help
+            PHY address on the MDIO bus.
+
+    config WEBSERVER_PORT
+        int "Web Dashboard Port"
+        default 80
+        help
+            HTTP port for the status dashboard.
+
+endmenu

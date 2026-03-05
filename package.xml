@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>micro_ros_ethernet_esp32p4</name>
+  <version>1.0.0</version>
+  <description>micro-ROS on ESP32-P4 with native Ethernet, PCA9685 servo control, and web dashboard</description>
+  <maintainer email="dingo@users.noreply.github.com">DingoOz</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+
+  <depend>std_msgs</depend>
+  <depend>rcl</depend>
+  <depend>rclc</depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>
