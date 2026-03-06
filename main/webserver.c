@@ -13,6 +13,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -20,6 +22,70 @@
 
 static const char *TAG = "webserver";
 static app_stats_t s_stats = {0};
+
+// Live OLED distance display
+static volatile bool s_oled_live = false;
+static TaskHandle_t s_oled_task = NULL;
+
+static void oled_live_task(void *arg)
+{
+    (void)arg;
+    char line[22];
+    while (s_oled_live) {
+        int mm = ultrasonic_read_mm();
+        ssd1306_clear();
+
+        // Title
+        ssd1306_text(28, 0, "RANGEFINDER");
+
+        if (mm >= 0) {
+            // Distance in large text
+            if (mm >= 10000) {
+                snprintf(line, sizeof(line), "%.2f m", mm / 1000.0f);
+            } else {
+                snprintf(line, sizeof(line), "%.1f cm", mm / 10.0f);
+            }
+            ssd1306_text_large(8, 16, line);
+
+            // Raw mm
+            snprintf(line, sizeof(line), "%d mm", mm);
+            ssd1306_text(40, 36, line);
+
+            // Progress bar outline (max 4000mm range)
+            int bar_x = 4;
+            int bar_y = 50;
+            int bar_w = 120;
+            int bar_h = 12;
+            ssd1306_rect(bar_x, bar_y, bar_w, bar_h, true);
+
+            // Fill proportional to distance
+            int fill = mm * (bar_w - 4) / 1000;
+            if (fill > bar_w - 4) fill = bar_w - 4;
+            if (fill < 1) fill = 1;
+            ssd1306_fill_rect(bar_x + 2, bar_y + 2, fill, bar_h - 4, true);
+        } else {
+            ssd1306_text_large(16, 24, "No signal");
+        }
+
+        ssd1306_show();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    s_oled_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void oled_live_start(void)
+{
+    if (s_oled_live) return;
+    s_oled_live = true;
+    xTaskCreate(oled_live_task, "oled_live", 4096, NULL, 3, &s_oled_task);
+}
+
+static void oled_live_stop(void)
+{
+    s_oled_live = false;
+    // Task will exit on next loop iteration
+}
 
 static esp_err_t dashboard_handler(httpd_req_t *req)
 {
@@ -105,6 +171,9 @@ static esp_err_t api_stats_handler(httpd_req_t *req)
     // Ultrasonic rangefinder
     int dist_mm = ultrasonic_read_mm();
     cJSON_AddNumberToObject(root, "ultrasonic_mm", dist_mm);
+
+    // OLED status
+    cJSON_AddBoolToObject(root, "oled_live", s_oled_live);
 
     // LED status
     cJSON_AddBoolToObject(root, "led_lightshow", rgb_led_lightshow_active());
@@ -386,10 +455,18 @@ static esp_err_t api_oled_handler(httpd_req_t *req)
 
     cJSON *action = cJSON_GetObjectItem(json, "action");
     if (action && cJSON_IsString(action)) {
-        if (strcmp(action->valuestring, "clear") == 0) {
+        if (strcmp(action->valuestring, "live_distance") == 0) {
+            if (s_oled_live) {
+                oled_live_stop();
+            } else {
+                oled_live_start();
+            }
+        } else if (strcmp(action->valuestring, "clear") == 0) {
+            oled_live_stop();
             ssd1306_clear();
             ssd1306_show();
         } else if (strcmp(action->valuestring, "text") == 0) {
+            oled_live_stop();
             cJSON *lines = cJSON_GetObjectItem(json, "lines");
             cJSON *large = cJSON_GetObjectItem(json, "large");
             bool use_large = large && cJSON_IsTrue(large);
@@ -427,9 +504,17 @@ static esp_err_t api_oled_handler(httpd_req_t *req)
     }
     cJSON_Delete(json);
 
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddBoolToObject(resp, "live_distance", s_oled_live);
+    char *json_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req, "{\"ok\":true}", 11);
+    esp_err_t err = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return err;
 }
 
 // TODO: re-enable after C6 slave firmware is flashed
