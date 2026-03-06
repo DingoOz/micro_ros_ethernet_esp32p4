@@ -7,6 +7,8 @@ idf_component_register(
         "system_stats.c"
         "radio.c"
         "rgb_led.c"
+        "ultrasonic.c"
+        "ssd1306.c"
     INCLUDE_DIRS
         "."
     REQUIRES

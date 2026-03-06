@@ -6,6 +6,8 @@
 #include "pca9685.h"
 #include "radio.h"
 #include "rgb_led.h"
+#include "ultrasonic.h"
+#include "ssd1306.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +24,7 @@ static app_stats_t s_stats = {0};
 static esp_err_t dashboard_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
     return httpd_resp_send(req, dashboard_html, sizeof(dashboard_html) - 1);
 }
 
@@ -98,6 +101,10 @@ static esp_err_t api_stats_handler(httpd_req_t *req)
     char radio_status[128];
     radio_get_status(radio_status, sizeof(radio_status));
     cJSON_AddStringToObject(root, "radio_status", radio_status);
+
+    // Ultrasonic rangefinder
+    int dist_mm = ultrasonic_read_mm();
+    cJSON_AddNumberToObject(root, "ultrasonic_mm", dist_mm);
 
     // LED status
     cJSON_AddBoolToObject(root, "led_lightshow", rgb_led_lightshow_active());
@@ -352,6 +359,79 @@ static esp_err_t api_servo_handler(httpd_req_t *req)
     return err;
 }
 
+static esp_err_t api_oled_handler(httpd_req_t *req)
+{
+    char buf[512];
+    int total_len = req->content_len;
+    if (total_len <= 0 || total_len >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad length");
+        return ESP_FAIL;
+    }
+    int received = 0;
+    while (received < total_len) {
+        int ret = httpd_req_recv(req, buf + received, total_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += ret;
+    }
+    buf[received] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *action = cJSON_GetObjectItem(json, "action");
+    if (action && cJSON_IsString(action)) {
+        if (strcmp(action->valuestring, "clear") == 0) {
+            ssd1306_clear();
+            ssd1306_show();
+        } else if (strcmp(action->valuestring, "text") == 0) {
+            cJSON *lines = cJSON_GetObjectItem(json, "lines");
+            cJSON *large = cJSON_GetObjectItem(json, "large");
+            bool use_large = large && cJSON_IsTrue(large);
+            ssd1306_clear();
+            if (lines && cJSON_IsArray(lines)) {
+                int y = 0;
+                int line_h = use_large ? 18 : 10;
+                cJSON *line;
+                cJSON_ArrayForEach(line, lines) {
+                    if (cJSON_IsString(line)) {
+                        if (use_large) {
+                            ssd1306_text_large(0, y, line->valuestring);
+                        } else {
+                            ssd1306_text(0, y, line->valuestring);
+                        }
+                    }
+                    y += line_h;
+                    if (y >= SSD1306_HEIGHT) break;
+                }
+            }
+            ssd1306_show();
+        } else if (strcmp(action->valuestring, "invert") == 0) {
+            cJSON *val = cJSON_GetObjectItem(json, "value");
+            ssd1306_invert(val && cJSON_IsTrue(val));
+        } else if (strcmp(action->valuestring, "contrast") == 0) {
+            cJSON *val = cJSON_GetObjectItem(json, "value");
+            if (val && cJSON_IsNumber(val)) {
+                ssd1306_contrast((uint8_t)val->valuedouble);
+            }
+        } else if (strcmp(action->valuestring, "on") == 0) {
+            ssd1306_display_on(true);
+        } else if (strcmp(action->valuestring, "off") == 0) {
+            ssd1306_display_on(false);
+        }
+    }
+    cJSON_Delete(json);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
 // TODO: re-enable after C6 slave firmware is flashed
 // static esp_err_t api_wifi_handler(httpd_req_t *req) { ... }
 
@@ -364,7 +444,7 @@ void webserver_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CONFIG_WEBSERVER_PORT;
-    config.stack_size = 8192;
+    config.stack_size = 16384;
 
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) {
@@ -413,6 +493,13 @@ void webserver_start(void)
         .handler  = api_servo_handler,
     };
     httpd_register_uri_handler(server, &uri_servo);
+
+    httpd_uri_t uri_oled = {
+        .uri      = "/api/oled",
+        .method   = HTTP_POST,
+        .handler  = api_oled_handler,
+    };
+    httpd_register_uri_handler(server, &uri_oled);
 
     // TODO: re-enable after C6 slave firmware
     // httpd_uri_t uri_wifi = { ... };

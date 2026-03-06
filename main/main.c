@@ -24,6 +24,8 @@
 #include "system_stats.h"
 #include "radio.h"
 #include "rgb_led.h"
+#include "ultrasonic.h"
+#include "ssd1306.h"
 
 static const char *TAG = "main";
 
@@ -181,6 +183,22 @@ void app_main(void)
     // Initialize RGB LED module (PiicoDev on same I2C bus)
     if (i2c_bus && !rgb_led_init(i2c_bus)) {
         ESP_LOGW(TAG, "RGB LED init failed - LEDs unavailable");
+    }
+
+    // Initialize ultrasonic rangefinder (PiicoDev on same I2C bus)
+    if (i2c_bus && !ultrasonic_init(i2c_bus, ULTRASONIC_DEFAULT_ADDR)) {
+        ESP_LOGW(TAG, "Ultrasonic init failed - rangefinder unavailable");
+    }
+
+    // Initialize SSD1306 OLED display (PiicoDev on same I2C bus)
+    if (i2c_bus && !ssd1306_init(i2c_bus, SSD1306_DEFAULT_ADDR)) {
+        ESP_LOGW(TAG, "SSD1306 init failed - OLED unavailable");
+    } else if (i2c_bus) {
+        ssd1306_clear();
+        ssd1306_text_large(10, 4, "ESP32-P4");
+        ssd1306_text(16, 28, "micro-ROS Dashboard");
+        ssd1306_text(34, 44, "Booting...");
+        ssd1306_show();
     }
 
     // Initialize radio (ES8311 codec on same I2C bus)
