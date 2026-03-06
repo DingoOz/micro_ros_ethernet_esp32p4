@@ -5,6 +5,8 @@ idf_component_register(
         "pca9685.c"
         "webserver.c"
         "system_stats.c"
+        "radio.c"
+        "rgb_led.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -18,8 +20,13 @@ idf_component_register(
         json
         freertos
         esp_driver_i2c
+        esp_driver_i2s
         esp_driver_tsens
+        esp_driver_gpio
+        esp_driver_sdmmc
         spi_flash
+        fatfs
+        vfs
         micro_ros_espidf_component
 )
 

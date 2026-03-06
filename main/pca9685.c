@@ -1,7 +1,6 @@
 #include "pca9685.h"
 
 #include <stdio.h>
-#include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -28,33 +27,24 @@ static bool pca9685_read_reg(uint8_t reg, uint8_t *val)
     return err == ESP_OK;
 }
 
-bool pca9685_init(int sda_pin, int scl_pin, uint8_t addr)
+bool pca9685_init(i2c_master_bus_handle_t bus_handle, uint8_t addr)
 {
-    // Configure I2C master bus
-    i2c_master_bus_config_t bus_config = {
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .i2c_port = I2C_NUM_0,
-        .scl_io_num = scl_pin,
-        .sda_io_num = sda_pin,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-
-    i2c_master_bus_handle_t bus_handle;
-    esp_err_t err = i2c_new_master_bus(&bus_config, &bus_handle);
-    if (err != ESP_OK) {
-        printf("PCA9685: I2C bus init failed: %s\n", esp_err_to_name(err));
-        return false;
-    }
-
-    // Add PCA9685 device
+    // Add PCA9685 device to existing bus
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = addr,
         .scl_speed_hz = 100000,  // 100 kHz
     };
 
-    err = i2c_master_bus_add_device(bus_handle, &dev_config, &g_dev);
+    // Probe first to check device is present
+    esp_err_t probe_err = i2c_master_probe(bus_handle, addr, 200);
+    if (probe_err != ESP_OK) {
+        printf("PCA9685: not found at 0x%02X (%s)\n", addr, esp_err_to_name(probe_err));
+        return false;
+    }
+    printf("PCA9685: found at 0x%02X\n", addr);
+
+    esp_err_t err = i2c_master_bus_add_device(bus_handle, &dev_config, &g_dev);
     if (err != ESP_OK) {
         printf("PCA9685: I2C device add failed: %s\n", esp_err_to_name(err));
         return false;
@@ -115,4 +105,20 @@ bool pca9685_set_servo_angle(uint8_t channel, float angle_deg)
 
     esp_err_t err = i2c_master_transmit(g_dev, buf, 5, 100);
     return err == ESP_OK;
+}
+
+bool pca9685_read_diag(uint8_t channel, uint8_t *mode1, uint8_t *mode2,
+                       uint8_t *prescale, uint16_t *off_count)
+{
+    if (g_dev == NULL) return false;
+    if (!pca9685_read_reg(PCA9685_MODE1, mode1)) return false;
+    if (!pca9685_read_reg(PCA9685_MODE2, mode2)) return false;
+    if (!pca9685_read_reg(PCA9685_PRE_SCALE, prescale)) return false;
+
+    uint8_t off_l, off_h;
+    uint8_t reg = PCA9685_LED0_ON_L + 4 * channel + 2; // OFF_L
+    if (!pca9685_read_reg(reg, &off_l)) return false;
+    if (!pca9685_read_reg(reg + 1, &off_h)) return false;
+    *off_count = (uint16_t)off_l | ((uint16_t)(off_h & 0x0F) << 8);
+    return true;
 }

@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "driver/i2c_master.h"
 
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
@@ -18,8 +19,11 @@
 
 #include "pca9685.h"
 #include "eth_transport.h"
+// #include "wifi_transport.h"  // TODO: re-enable after C6 slave firmware
 #include "webserver.h"
 #include "system_stats.h"
+#include "radio.h"
+#include "rgb_led.h"
 
 static const char *TAG = "main";
 
@@ -66,7 +70,7 @@ static void micro_ros_task(void *arg)
     // Wait for agent — ping for up to 2 minutes
     ESP_LOGI(TAG, "Waiting for micro-ROS agent...");
     const int timeout_ms = 1000;
-    const uint8_t attempts = 120;
+    const uint8_t attempts = 30;
 
     rcl_ret_t ret = rmw_uros_ping_agent(timeout_ms, attempts);
     if (ret != RCL_RET_OK) {
@@ -143,16 +147,45 @@ void app_main(void)
         ESP_LOGE(TAG, "Ethernet init failed or no IP, continuing anyway...");
     }
 
-    // Initialize PCA9685 servo driver
-    if (!pca9685_init(CONFIG_SERVO_I2C_SDA_PIN, CONFIG_SERVO_I2C_SCL_PIN,
-                      CONFIG_SERVO_PCA9685_ADDR)) {
+    // TODO: Initialize WiFi STA after C6 slave firmware is flashed
+    // if (!wifi_transport_init()) {
+    //     ESP_LOGW(TAG, "WiFi init failed or no IP, continuing anyway...");
+    // }
+
+    // Create shared I2C master bus (used by PCA9685 and ES8311)
+    i2c_master_bus_config_t bus_config = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = I2C_NUM_0,
+        .scl_io_num = CONFIG_SERVO_I2C_SCL_PIN,
+        .sda_io_num = CONFIG_SERVO_I2C_SDA_PIN,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t i2c_bus = NULL;
+    esp_err_t i2c_err = i2c_new_master_bus(&bus_config, &i2c_bus);
+    if (i2c_err != ESP_OK) {
+        ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(i2c_err));
+    }
+
+    // Initialize PCA9685 servo driver (shares I2C bus)
+    if (i2c_bus && !pca9685_init(i2c_bus, CONFIG_SERVO_PCA9685_ADDR)) {
         ESP_LOGW(TAG, "PCA9685 init failed - servos unavailable");
-    } else {
+    } else if (i2c_bus) {
         // Centre all servos to 90 deg on startup
         for (int i = 0; i < NUM_SERVOS; i++) {
             pca9685_set_servo_angle(i, 90.0f);
         }
         ESP_LOGI(TAG, "Servos centred to 90 deg");
+    }
+
+    // Initialize RGB LED module (PiicoDev on same I2C bus)
+    if (i2c_bus && !rgb_led_init(i2c_bus)) {
+        ESP_LOGW(TAG, "RGB LED init failed - LEDs unavailable");
+    }
+
+    // Initialize radio (ES8311 codec on same I2C bus)
+    if (i2c_bus && !radio_init(i2c_bus)) {
+        ESP_LOGW(TAG, "Radio init failed - audio unavailable");
     }
 
     // Start web dashboard

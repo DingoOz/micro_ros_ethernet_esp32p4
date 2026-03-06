@@ -2,12 +2,18 @@
 #include "dashboard.h"
 #include "system_stats.h"
 #include "eth_transport.h"
+// #include "wifi_transport.h"  // TODO: re-enable after C6 slave firmware
+#include "pca9685.h"
+#include "radio.h"
+#include "rgb_led.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "cJSON.h"
 
 static const char *TAG = "webserver";
@@ -58,6 +64,20 @@ static esp_err_t api_stats_handler(httpd_req_t *req)
     cJSON_AddStringToObject(root, "eth_gw", eth.gw_str);
     cJSON_AddStringToObject(root, "eth_netmask", eth.netmask_str);
 
+    // WiFi — disabled until C6 slave firmware is flashed
+    // wifi_status_t wifi;
+    // wifi_transport_get_status(&wifi);
+    cJSON_AddBoolToObject(root, "wifi_connected", false);
+    cJSON_AddBoolToObject(root, "wifi_got_ip", false);
+    cJSON_AddNumberToObject(root, "wifi_rssi", 0);
+    cJSON_AddNumberToObject(root, "wifi_channel", 0);
+    cJSON_AddStringToObject(root, "wifi_ssid", "");
+    cJSON_AddStringToObject(root, "wifi_ip", "");
+    cJSON_AddStringToObject(root, "wifi_gw", "");
+    cJSON_AddStringToObject(root, "wifi_netmask", "");
+    cJSON_AddStringToObject(root, "wifi_mac", "");
+    cJSON_AddStringToObject(root, "wifi_auth", "");
+
     // micro-ROS app stats
     cJSON_AddNumberToObject(root, "pub_count", s_stats.publish_count);
 
@@ -65,6 +85,23 @@ static esp_err_t api_stats_handler(httpd_req_t *req)
     for (int i = 0; i < 4; i++) {
         cJSON_AddItemToArray(servos, cJSON_CreateNumber(s_stats.servo_angles[i]));
     }
+
+    // Radio status
+    cJSON_AddBoolToObject(root, "radio_playing", radio_is_playing());
+    cJSON_AddBoolToObject(root, "radio_paused", radio_is_paused());
+    cJSON_AddNumberToObject(root, "radio_volume", radio_get_volume());
+    cJSON_AddStringToObject(root, "radio_source",
+                            radio_get_source() == RADIO_SOURCE_SDCARD ? "sdcard" : "stream");
+    char title[128];
+    radio_get_title(title, sizeof(title));
+    cJSON_AddStringToObject(root, "radio_title", title);
+    char radio_status[128];
+    radio_get_status(radio_status, sizeof(radio_status));
+    cJSON_AddStringToObject(root, "radio_status", radio_status);
+
+    // LED status
+    cJSON_AddBoolToObject(root, "led_lightshow", rgb_led_lightshow_active());
+    cJSON_AddBoolToObject(root, "led_vu", rgb_led_vu_active());
 
     // FreeRTOS tasks
     cJSON_AddNumberToObject(root, "task_count", sys.task_count);
@@ -91,6 +128,232 @@ static esp_err_t api_stats_handler(httpd_req_t *req)
 
     return ret;
 }
+
+static esp_err_t bandwidth_test_handler(httpd_req_t *req)
+{
+    char query[64] = {0};
+    size_t total_size = 2 * 1024 * 1024;
+    int test_type = 0; // 0=zero, 1=random, 2=pattern
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query) - 1) == ESP_OK) {
+        char param[16];
+        if (httpd_query_key_value(query, "size", param, sizeof(param)) == ESP_OK) {
+            int val = atoi(param);
+            if (val > 0) total_size = (size_t)val;
+        }
+        if (httpd_query_key_value(query, "type", param, sizeof(param)) == ESP_OK) {
+            if (strcmp(param, "random") == 0) test_type = 1;
+            else if (strcmp(param, "pattern") == 0) test_type = 2;
+        }
+    }
+
+    if (total_size > 10 * 1024 * 1024) total_size = 10 * 1024 * 1024;
+    if (total_size < 1024) total_size = 1024;
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    char buf[4096];
+    uint32_t rng_state = 0x12345678; // xorshift32 seed
+    if (test_type == 0) {
+        memset(buf, 0, sizeof(buf));
+    } else if (test_type == 2) {
+        for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)(i & 0xFF);
+    }
+
+    size_t sent = 0;
+    while (sent < total_size) {
+        size_t chunk = sizeof(buf);
+        if (total_size - sent < chunk) chunk = total_size - sent;
+        if (test_type == 1) {
+            // Fast xorshift32 PRNG — much faster than esp_fill_random() for bandwidth testing
+            uint32_t *p = (uint32_t *)buf;
+            for (size_t i = 0; i < chunk / 4; i++) {
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 17;
+                rng_state ^= rng_state << 5;
+                p[i] = rng_state;
+            }
+        }
+        if (httpd_resp_send_chunk(req, buf, chunk) != ESP_OK) {
+            httpd_resp_send_chunk(req, NULL, 0);
+            return ESP_FAIL;
+        }
+        sent += chunk;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static esp_err_t api_radio_handler(httpd_req_t *req)
+{
+    char buf[128];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *action = cJSON_GetObjectItem(json, "action");
+    cJSON *volume = cJSON_GetObjectItem(json, "volume");
+
+    cJSON *source = cJSON_GetObjectItem(json, "source");
+
+    if (source && cJSON_IsString(source)) {
+        if (strcmp(source->valuestring, "sdcard") == 0) {
+            radio_set_source(RADIO_SOURCE_SDCARD);
+        } else if (strcmp(source->valuestring, "stream") == 0) {
+            radio_set_source(RADIO_SOURCE_STREAM);
+        }
+    }
+    if (action && cJSON_IsString(action)) {
+        if (strcmp(action->valuestring, "play") == 0) {
+            radio_play();
+        } else if (strcmp(action->valuestring, "stop") == 0) {
+            radio_stop();
+        } else if (strcmp(action->valuestring, "pause") == 0) {
+            radio_pause();
+        } else if (strcmp(action->valuestring, "next") == 0) {
+            radio_next();
+        } else if (strcmp(action->valuestring, "prev") == 0) {
+            radio_prev();
+        }
+    }
+    if (volume && cJSON_IsNumber(volume)) {
+        radio_set_volume((int)volume->valuedouble);
+    }
+
+    cJSON_Delete(json);
+
+    // Return current status
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "playing", radio_is_playing());
+    cJSON_AddBoolToObject(resp, "paused", radio_is_paused());
+    cJSON_AddNumberToObject(resp, "volume", radio_get_volume());
+    cJSON_AddStringToObject(resp, "source",
+                            radio_get_source() == RADIO_SOURCE_SDCARD ? "sdcard" : "stream");
+    char title[128];
+    radio_get_title(title, sizeof(title));
+    cJSON_AddStringToObject(resp, "title", title);
+    char rstatus[128];
+    radio_get_status(rstatus, sizeof(rstatus));
+    cJSON_AddStringToObject(resp, "status", rstatus);
+
+    char *json_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    esp_err_t err = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return err;
+}
+
+static esp_err_t api_led_handler(httpd_req_t *req)
+{
+    char buf[128];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *action = cJSON_GetObjectItem(json, "action");
+    if (action && cJSON_IsString(action)) {
+        if (strcmp(action->valuestring, "lightshow") == 0) {
+            if (rgb_led_lightshow_active()) {
+                rgb_led_lightshow_stop();
+            } else {
+                rgb_led_lightshow_start();
+            }
+        } else if (strcmp(action->valuestring, "vu") == 0) {
+            if (rgb_led_vu_active()) {
+                rgb_led_vu_stop();
+            } else {
+                rgb_led_vu_start();
+            }
+        } else if (strcmp(action->valuestring, "off") == 0) {
+            rgb_led_lightshow_stop();
+            rgb_led_vu_stop();
+            rgb_led_clear();
+            rgb_led_show();
+        }
+    }
+    cJSON_Delete(json);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "lightshow", rgb_led_lightshow_active());
+    cJSON_AddBoolToObject(resp, "vu", rgb_led_vu_active());
+    char *json_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    esp_err_t err = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return err;
+}
+
+static esp_err_t api_servo_handler(httpd_req_t *req)
+{
+    char buf[64];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *ch = cJSON_GetObjectItem(json, "channel");
+    cJSON *angle = cJSON_GetObjectItem(json, "angle");
+    bool success = false;
+    int channel = -1;
+    float a = 0;
+    if (ch && angle && cJSON_IsNumber(ch) && cJSON_IsNumber(angle)) {
+        channel = (int)ch->valuedouble;
+        a = (float)angle->valuedouble;
+        if (channel >= 0 && channel < 16 && a >= 0 && a <= 180) {
+            success = pca9685_set_servo_angle((uint8_t)channel, a);
+            s_stats.servo_angles[channel] = a;
+        }
+    }
+    cJSON_Delete(json);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", success);
+    cJSON_AddNumberToObject(resp, "channel", channel);
+    cJSON_AddNumberToObject(resp, "angle", a);
+    char *json_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    esp_err_t err = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return err;
+}
+
+// TODO: re-enable after C6 slave firmware is flashed
+// static esp_err_t api_wifi_handler(httpd_req_t *req) { ... }
 
 void webserver_start(void)
 {
@@ -122,6 +385,38 @@ void webserver_start(void)
         .handler  = api_stats_handler,
     };
     httpd_register_uri_handler(server, &uri_api);
+
+    httpd_uri_t uri_bw = {
+        .uri      = "/api/bandwidth-test",
+        .method   = HTTP_GET,
+        .handler  = bandwidth_test_handler,
+    };
+    httpd_register_uri_handler(server, &uri_bw);
+
+    httpd_uri_t uri_radio = {
+        .uri      = "/api/radio",
+        .method   = HTTP_POST,
+        .handler  = api_radio_handler,
+    };
+    httpd_register_uri_handler(server, &uri_radio);
+
+    httpd_uri_t uri_led = {
+        .uri      = "/api/led",
+        .method   = HTTP_POST,
+        .handler  = api_led_handler,
+    };
+    httpd_register_uri_handler(server, &uri_led);
+
+    httpd_uri_t uri_servo = {
+        .uri      = "/api/servo",
+        .method   = HTTP_POST,
+        .handler  = api_servo_handler,
+    };
+    httpd_register_uri_handler(server, &uri_servo);
+
+    // TODO: re-enable after C6 slave firmware
+    // httpd_uri_t uri_wifi = { ... };
+    // httpd_register_uri_handler(server, &uri_wifi);
 
     ESP_LOGI(TAG, "HTTP server started on port %d", CONFIG_WEBSERVER_PORT);
 }

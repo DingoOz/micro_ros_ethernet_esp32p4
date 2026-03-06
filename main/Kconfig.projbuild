@@ -66,4 +66,16 @@ menu "micro-ROS ESP32-P4 Configuration"
         help
             HTTP port for the status dashboard.
 
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "DingoNet"
+        help
+            SSID of the WiFi network to connect to.
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default "policymeeting"
+        help
+            Password of the WiFi network.
+
 endmenu

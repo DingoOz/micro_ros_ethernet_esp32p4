@@ -1,6 +1,7 @@
 #ifndef WEBSERVER_H
 #define WEBSERVER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct {
