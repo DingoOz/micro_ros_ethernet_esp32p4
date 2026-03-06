@@ -23,67 +23,178 @@
 static const char *TAG = "webserver";
 static app_stats_t s_stats = {0};
 
-// Live OLED distance display
-static volatile bool s_oled_live = false;
+// Live OLED modes
+typedef enum { OLED_MODE_NONE = 0, OLED_MODE_DISTANCE, OLED_MODE_VU } oled_mode_t;
+static volatile oled_mode_t s_oled_mode = OLED_MODE_NONE;
 static TaskHandle_t s_oled_task = NULL;
+
+static void oled_distance_loop(void)
+{
+    char line[22];
+    int mm = ultrasonic_read_mm();
+    ssd1306_clear();
+    ssd1306_text(28, 0, "RANGEFINDER");
+    if (mm >= 0) {
+        if (mm >= 10000) {
+            snprintf(line, sizeof(line), "%.2f m", mm / 1000.0f);
+        } else {
+            snprintf(line, sizeof(line), "%.1f cm", mm / 10.0f);
+        }
+        ssd1306_text_large(8, 16, line);
+        snprintf(line, sizeof(line), "%d mm", mm);
+        ssd1306_text(40, 36, line);
+        int bar_x = 4, bar_y = 50, bar_w = 120, bar_h = 12;
+        ssd1306_rect(bar_x, bar_y, bar_w, bar_h, true);
+        int fill = mm * (bar_w - 4) / 1000;
+        if (fill > bar_w - 4) fill = bar_w - 4;
+        if (fill < 1) fill = 1;
+        ssd1306_fill_rect(bar_x + 2, bar_y + 2, fill, bar_h - 4, true);
+    } else {
+        ssd1306_text_large(16, 24, "No signal");
+    }
+    ssd1306_show();
+}
+
+// Smoothed VU levels with decay
+static float s_vu_smooth_l = 0.0f;
+static float s_vu_smooth_r = 0.0f;
+static float s_vu_peak_l = 0.0f;
+static float s_vu_peak_r = 0.0f;
+static int s_peak_hold_l = 0;
+static int s_peak_hold_r = 0;
+
+static void oled_vu_loop(void)
+{
+    float raw_l, raw_r;
+    bool playing = radio_get_vu(&raw_l, &raw_r);
+
+    // Smoothing: fast attack, slow decay
+    if (raw_l > s_vu_smooth_l) {
+        s_vu_smooth_l = raw_l;
+    } else {
+        s_vu_smooth_l *= 0.85f;
+    }
+    if (raw_r > s_vu_smooth_r) {
+        s_vu_smooth_r = raw_r;
+    } else {
+        s_vu_smooth_r *= 0.85f;
+    }
+
+    // Peak hold (holds for ~1s = 20 frames at 50ms)
+    if (s_vu_smooth_l > s_vu_peak_l) {
+        s_vu_peak_l = s_vu_smooth_l;
+        s_peak_hold_l = 20;
+    } else if (s_peak_hold_l > 0) {
+        s_peak_hold_l--;
+    } else {
+        s_vu_peak_l *= 0.95f;
+    }
+    if (s_vu_smooth_r > s_vu_peak_r) {
+        s_vu_peak_r = s_vu_smooth_r;
+        s_peak_hold_r = 20;
+    } else if (s_peak_hold_r > 0) {
+        s_peak_hold_r--;
+    } else {
+        s_vu_peak_r *= 0.95f;
+    }
+
+    ssd1306_clear();
+
+    // Title + track name
+    if (playing) {
+        char title[22];
+        radio_get_title(title, sizeof(title));
+        if (title[0]) {
+            ssd1306_text(0, 0, title);
+        } else {
+            ssd1306_text(36, 0, "VU METER");
+        }
+    } else {
+        ssd1306_text(36, 0, "VU METER");
+        ssd1306_text(28, 28, "Not playing");
+    }
+
+    // Draw stereo VU bars
+    int bar_x = 20;
+    int bar_w = 104;
+    int bar_h = 14;
+
+    // Left channel
+    int ly = 14;
+    ssd1306_text(0, ly + 3, "L");
+    ssd1306_rect(bar_x, ly, bar_w, bar_h, true);
+    int fill_l = (int)(s_vu_smooth_l * (bar_w - 4));
+    if (fill_l > bar_w - 4) fill_l = bar_w - 4;
+    if (fill_l > 0) ssd1306_fill_rect(bar_x + 2, ly + 2, fill_l, bar_h - 4, true);
+    // Peak marker
+    int peak_x_l = bar_x + 2 + (int)(s_vu_peak_l * (bar_w - 4));
+    if (peak_x_l > bar_x + bar_w - 3) peak_x_l = bar_x + bar_w - 3;
+    if (s_vu_peak_l > 0.02f) ssd1306_vline(peak_x_l, ly + 1, bar_h - 2, true);
+
+    // Right channel
+    int ry = 34;
+    ssd1306_text(0, ry + 3, "R");
+    ssd1306_rect(bar_x, ry, bar_w, bar_h, true);
+    int fill_r = (int)(s_vu_smooth_r * (bar_w - 4));
+    if (fill_r > bar_w - 4) fill_r = bar_w - 4;
+    if (fill_r > 0) ssd1306_fill_rect(bar_x + 2, ry + 2, fill_r, bar_h - 4, true);
+    // Peak marker
+    int peak_x_r = bar_x + 2 + (int)(s_vu_peak_r * (bar_w - 4));
+    if (peak_x_r > bar_x + bar_w - 3) peak_x_r = bar_x + bar_w - 3;
+    if (s_vu_peak_r > 0.02f) ssd1306_vline(peak_x_r, ry + 1, bar_h - 2, true);
+
+    // dB scale markers at bottom
+    ssd1306_text(18, 52, "-40  -20  -10  -6  0");
+    // Tick marks
+    int ticks[] = {0, 25, 50, 70, 100}; // percentage positions
+    for (int i = 0; i < 5; i++) {
+        int tx = bar_x + 2 + ticks[i] * (bar_w - 4) / 100;
+        ssd1306_vline(tx, 50, 2, true);
+    }
+
+    ssd1306_show();
+}
 
 static void oled_live_task(void *arg)
 {
     (void)arg;
-    char line[22];
-    while (s_oled_live) {
-        int mm = ultrasonic_read_mm();
-        ssd1306_clear();
-
-        // Title
-        ssd1306_text(28, 0, "RANGEFINDER");
-
-        if (mm >= 0) {
-            // Distance in large text
-            if (mm >= 10000) {
-                snprintf(line, sizeof(line), "%.2f m", mm / 1000.0f);
-            } else {
-                snprintf(line, sizeof(line), "%.1f cm", mm / 10.0f);
-            }
-            ssd1306_text_large(8, 16, line);
-
-            // Raw mm
-            snprintf(line, sizeof(line), "%d mm", mm);
-            ssd1306_text(40, 36, line);
-
-            // Progress bar outline (max 4000mm range)
-            int bar_x = 4;
-            int bar_y = 50;
-            int bar_w = 120;
-            int bar_h = 12;
-            ssd1306_rect(bar_x, bar_y, bar_w, bar_h, true);
-
-            // Fill proportional to distance
-            int fill = mm * (bar_w - 4) / 1000;
-            if (fill > bar_w - 4) fill = bar_w - 4;
-            if (fill < 1) fill = 1;
-            ssd1306_fill_rect(bar_x + 2, bar_y + 2, fill, bar_h - 4, true);
+    while (s_oled_mode != OLED_MODE_NONE) {
+        if (s_oled_mode == OLED_MODE_DISTANCE) {
+            oled_distance_loop();
+            vTaskDelay(pdMS_TO_TICKS(100));
+        } else if (s_oled_mode == OLED_MODE_VU) {
+            oled_vu_loop();
+            vTaskDelay(pdMS_TO_TICKS(50));
         } else {
-            ssd1306_text_large(16, 24, "No signal");
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
-
-        ssd1306_show();
-        vTaskDelay(pdMS_TO_TICKS(100));
     }
     s_oled_task = NULL;
     vTaskDelete(NULL);
 }
 
-static void oled_live_start(void)
+static void oled_mode_start(oled_mode_t mode)
 {
-    if (s_oled_live) return;
-    s_oled_live = true;
-    xTaskCreate(oled_live_task, "oled_live", 4096, NULL, 3, &s_oled_task);
+    if (s_oled_mode == mode) return; // already in this mode
+    // Stop existing task if switching modes
+    if (s_oled_mode != OLED_MODE_NONE) {
+        s_oled_mode = OLED_MODE_NONE;
+        vTaskDelay(pdMS_TO_TICKS(150)); // let task exit
+    }
+    // Reset VU state
+    s_vu_smooth_l = s_vu_smooth_r = 0.0f;
+    s_vu_peak_l = s_vu_peak_r = 0.0f;
+    s_peak_hold_l = s_peak_hold_r = 0;
+
+    s_oled_mode = mode;
+    if (s_oled_task == NULL) {
+        xTaskCreate(oled_live_task, "oled_live", 4096, NULL, 3, &s_oled_task);
+    }
 }
 
 static void oled_live_stop(void)
 {
-    s_oled_live = false;
+    s_oled_mode = OLED_MODE_NONE;
     // Task will exit on next loop iteration
 }
 
@@ -173,7 +284,8 @@ static esp_err_t api_stats_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "ultrasonic_mm", dist_mm);
 
     // OLED status
-    cJSON_AddBoolToObject(root, "oled_live", s_oled_live);
+    cJSON_AddBoolToObject(root, "oled_live", s_oled_mode == OLED_MODE_DISTANCE);
+    cJSON_AddBoolToObject(root, "oled_vu", s_oled_mode == OLED_MODE_VU);
 
     // LED status
     cJSON_AddBoolToObject(root, "led_lightshow", rgb_led_lightshow_active());
@@ -456,10 +568,16 @@ static esp_err_t api_oled_handler(httpd_req_t *req)
     cJSON *action = cJSON_GetObjectItem(json, "action");
     if (action && cJSON_IsString(action)) {
         if (strcmp(action->valuestring, "live_distance") == 0) {
-            if (s_oled_live) {
+            if (s_oled_mode == OLED_MODE_DISTANCE) {
                 oled_live_stop();
             } else {
-                oled_live_start();
+                oled_mode_start(OLED_MODE_DISTANCE);
+            }
+        } else if (strcmp(action->valuestring, "vu") == 0) {
+            if (s_oled_mode == OLED_MODE_VU) {
+                oled_live_stop();
+            } else {
+                oled_mode_start(OLED_MODE_VU);
             }
         } else if (strcmp(action->valuestring, "clear") == 0) {
             oled_live_stop();
@@ -506,7 +624,8 @@ static esp_err_t api_oled_handler(httpd_req_t *req)
 
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "ok", true);
-    cJSON_AddBoolToObject(resp, "live_distance", s_oled_live);
+    cJSON_AddBoolToObject(resp, "live_distance", s_oled_mode == OLED_MODE_DISTANCE);
+    cJSON_AddBoolToObject(resp, "vu_meter", s_oled_mode == OLED_MODE_VU);
     char *json_str = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
 

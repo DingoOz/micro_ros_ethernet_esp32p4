@@ -79,6 +79,8 @@ static volatile bool s_dec_flush = false;
 static volatile bool s_paused = false;
 static volatile radio_source_t s_source = RADIO_SOURCE_SDCARD;
 static int s_volume = 70;
+static volatile float s_peak_l = 0.0f;
+static volatile float s_peak_r = 0.0f;
 static char s_title[128] = {0};
 static char s_status[128] = "Not initialised";
 static SemaphoreHandle_t s_title_mutex = NULL;
@@ -725,14 +727,21 @@ static void decode_task(void *arg)
                 ESP_LOGI(TAG, "Audio: %lu Hz, %d ch -> stereo", (unsigned long)current_rate, info.channels);
             }
 
-            // Feed VU meter if active
-            if (rgb_led_vu_active()) {
-                int16_t peak = 0;
-                for (int i = 0; i < pcm_count; i++) {
-                    int16_t abs_val = s_pcm[i] < 0 ? (int16_t)-s_pcm[i] : s_pcm[i];
-                    if (abs_val > peak) peak = abs_val;
+            // Compute stereo peak levels for VU meters
+            {
+                int16_t peak_l = 0, peak_r = 0;
+                for (int i = 0; i < pcm_count - 1; i += 2) {
+                    int16_t al = s_pcm[i] < 0 ? (int16_t)-s_pcm[i] : s_pcm[i];
+                    int16_t ar = s_pcm[i+1] < 0 ? (int16_t)-s_pcm[i+1] : s_pcm[i+1];
+                    if (al > peak_l) peak_l = al;
+                    if (ar > peak_r) peak_r = ar;
                 }
-                rgb_led_vu_feed((float)peak / 32767.0f);
+                s_peak_l = (float)peak_l / 32767.0f;
+                s_peak_r = (float)peak_r / 32767.0f;
+                if (rgb_led_vu_active()) {
+                    float mono = (s_peak_l > s_peak_r) ? s_peak_l : s_peak_r;
+                    rgb_led_vu_feed(mono);
+                }
             }
 
             // Wait while paused
@@ -942,4 +951,16 @@ void radio_get_status(char *buf, int len)
     if (!buf || len <= 0) return;
     strncpy(buf, s_status, len - 1);
     buf[len - 1] = '\0';
+}
+
+bool radio_get_vu(float *left, float *right)
+{
+    if (!s_playing || s_paused) {
+        if (left) *left = 0.0f;
+        if (right) *right = 0.0f;
+        return false;
+    }
+    if (left) *left = s_peak_l;
+    if (right) *right = s_peak_r;
+    return true;
 }

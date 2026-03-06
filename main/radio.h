@@ -53,4 +53,7 @@ void radio_get_title(char *buf, int len);
 // Copy status message into buf (for diagnostics).
 void radio_get_status(char *buf, int len);
 
+// Get current stereo VU levels (0.0-1.0). Returns false if not playing.
+bool radio_get_vu(float *left, float *right);
+
 #endif // RADIO_H
