@@ -27,6 +27,7 @@
 #include "ultrasonic.h"
 #include "ssd1306.h"
 #include "slide_pot.h"
+#include "camera.h"
 
 static const char *TAG = "main";
 
@@ -210,6 +211,11 @@ void app_main(void)
     // Initialize radio (ES8311 codec on same I2C bus)
     if (i2c_bus && !radio_init(i2c_bus)) {
         ESP_LOGW(TAG, "Radio init failed - audio unavailable");
+    }
+
+    // Initialize camera (OV5647 via MIPI CSI)
+    if (!camera_init(i2c_bus)) {
+        ESP_LOGW(TAG, "Camera init failed - video unavailable");
     }
 
     // Start web dashboard

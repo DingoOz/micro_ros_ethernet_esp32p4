@@ -10,6 +10,7 @@ idf_component_register(
         "ultrasonic.c"
         "ssd1306.c"
         "slide_pot.c"
+        "camera.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -31,6 +32,10 @@ idf_component_register(
         fatfs
         vfs
         micro_ros_espidf_component
+        esp_driver_cam
+        esp_driver_isp
+        esp_driver_jpeg
+        esp_mm
 )
 
 # Allow multiple definitions for 64-bit atomics (rcutils vs newlib)

@@ -9,6 +9,7 @@
 #include "ultrasonic.h"
 #include "ssd1306.h"
 #include "slide_pot.h"
+#include "camera.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -321,6 +322,9 @@ static esp_err_t api_stats_handler(httpd_req_t *req)
     // Ultrasonic rangefinder
     int dist_mm = ultrasonic_read_mm();
     cJSON_AddNumberToObject(root, "ultrasonic_mm", dist_mm);
+
+    // Camera
+    cJSON_AddBoolToObject(root, "camera_ready", camera_is_ready());
 
     // Slide pot
     cJSON_AddBoolToObject(root, "slide_vol_active", s_slide_vol_active);
@@ -708,6 +712,32 @@ static esp_err_t api_i2c_scan_handler(httpd_req_t *req)
     return err;
 }
 
+static esp_err_t api_camera_snapshot_handler(httpd_req_t *req)
+{
+    // Lazy-init camera hardware on first request
+    if (!camera_is_ready()) {
+        if (!camera_start()) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Camera init failed");
+            return ESP_FAIL;
+        }
+    }
+    uint8_t *jpeg = NULL;
+    size_t jpeg_len = 0;
+    if (!camera_capture_jpeg(&jpeg, &jpeg_len)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Capture failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    esp_err_t err = httpd_resp_send(req, (const char *)jpeg, jpeg_len);
+    free(jpeg);
+    return err;
+}
+
+// Stream endpoint removed — snapshot-based refresh is used instead
+// to avoid blocking the httpd worker thread.
+
 static esp_err_t api_slide_handler(httpd_req_t *req)
 {
     char buf[64];
@@ -833,6 +863,15 @@ void webserver_start(i2c_master_bus_handle_t i2c_bus)
         .handler  = api_i2c_scan_handler,
     };
     httpd_register_uri_handler(server, &uri_i2c_scan);
+
+    httpd_uri_t uri_cam_snap = {
+        .uri      = "/api/camera/snapshot",
+        .method   = HTTP_GET,
+        .handler  = api_camera_snapshot_handler,
+    };
+    httpd_register_uri_handler(server, &uri_cam_snap);
+
+
 
     // TODO: re-enable after C6 slave firmware
     // httpd_uri_t uri_wifi = { ... };
