@@ -9,6 +9,7 @@ idf_component_register(
         "rgb_led.c"
         "ultrasonic.c"
         "ssd1306.c"
+        "slide_pot.c"
     INCLUDE_DIRS
         "."
     REQUIRES

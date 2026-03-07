@@ -26,6 +26,7 @@
 #include "rgb_led.h"
 #include "ultrasonic.h"
 #include "ssd1306.h"
+#include "slide_pot.h"
 
 static const char *TAG = "main";
 
@@ -201,13 +202,18 @@ void app_main(void)
         ssd1306_show();
     }
 
+    // Initialize slide potentiometer (PiicoDev on same I2C bus, ASW1 on = 0x36)
+    if (i2c_bus && !slide_pot_init(i2c_bus, SLIDE_POT_DEFAULT_ADDR)) {
+        ESP_LOGW(TAG, "Slide pot init failed - volume slider unavailable");
+    }
+
     // Initialize radio (ES8311 codec on same I2C bus)
     if (i2c_bus && !radio_init(i2c_bus)) {
         ESP_LOGW(TAG, "Radio init failed - audio unavailable");
     }
 
     // Start web dashboard
-    webserver_start();
+    webserver_start(i2c_bus);
 
     // Spawn micro-ROS task on core 1
     xTaskCreatePinnedToCore(

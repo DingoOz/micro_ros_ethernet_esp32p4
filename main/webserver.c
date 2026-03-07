@@ -8,6 +8,7 @@
 #include "rgb_led.h"
 #include "ultrasonic.h"
 #include "ssd1306.h"
+#include "slide_pot.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -198,6 +199,44 @@ static void oled_live_stop(void)
     // Task will exit on next loop iteration
 }
 
+// Slide potentiometer volume control task
+static volatile bool s_slide_vol_active = false;
+static TaskHandle_t s_slide_vol_task = NULL;
+static volatile int s_slide_raw = -1;
+
+static void slide_vol_task(void *arg)
+{
+    (void)arg;
+    int last_vol = -1;
+    while (s_slide_vol_active) {
+        int raw = slide_pot_read_raw();
+        if (raw >= 0) {
+            s_slide_raw = raw;
+            int vol = (raw * 100) / 1023;
+            // Only update if changed by more than 1% to avoid jitter
+            if (last_vol < 0 || abs(vol - last_vol) > 1) {
+                radio_set_volume(vol);
+                last_vol = vol;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    s_slide_vol_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void slide_vol_start(void)
+{
+    if (s_slide_vol_active) return;
+    s_slide_vol_active = true;
+    xTaskCreate(slide_vol_task, "slide_vol", 2048, NULL, 3, &s_slide_vol_task);
+}
+
+static void slide_vol_stop(void)
+{
+    s_slide_vol_active = false;
+}
+
 static esp_err_t dashboard_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -282,6 +321,10 @@ static esp_err_t api_stats_handler(httpd_req_t *req)
     // Ultrasonic rangefinder
     int dist_mm = ultrasonic_read_mm();
     cJSON_AddNumberToObject(root, "ultrasonic_mm", dist_mm);
+
+    // Slide pot
+    cJSON_AddBoolToObject(root, "slide_vol_active", s_slide_vol_active);
+    cJSON_AddNumberToObject(root, "slide_raw", s_slide_raw);
 
     // OLED status
     cJSON_AddBoolToObject(root, "oled_live", s_oled_mode == OLED_MODE_DISTANCE);
@@ -636,11 +679,82 @@ static esp_err_t api_oled_handler(httpd_req_t *req)
     return err;
 }
 
+static i2c_master_bus_handle_t s_i2c_bus = NULL;
+
+static esp_err_t api_i2c_scan_handler(httpd_req_t *req)
+{
+    if (!s_i2c_bus) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No I2C bus");
+        return ESP_FAIL;
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON *devices = cJSON_AddArrayToObject(root, "devices");
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_master_probe(s_i2c_bus, addr, 50) == ESP_OK) {
+            cJSON *dev = cJSON_CreateObject();
+            char hex[8];
+            snprintf(hex, sizeof(hex), "0x%02X", addr);
+            cJSON_AddStringToObject(dev, "addr", hex);
+            cJSON_AddNumberToObject(dev, "dec", addr);
+            cJSON_AddItemToArray(devices, dev);
+        }
+    }
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    esp_err_t err = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return err;
+}
+
+static esp_err_t api_slide_handler(httpd_req_t *req)
+{
+    char buf[64];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *action = cJSON_GetObjectItem(json, "action");
+    if (action && cJSON_IsString(action)) {
+        if (strcmp(action->valuestring, "toggle") == 0) {
+            if (s_slide_vol_active) {
+                slide_vol_stop();
+            } else {
+                slide_vol_start();
+            }
+        }
+    }
+    cJSON_Delete(json);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "active", s_slide_vol_active);
+    cJSON_AddNumberToObject(resp, "raw", s_slide_raw);
+    char *json_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    esp_err_t err = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return err;
+}
+
 // TODO: re-enable after C6 slave firmware is flashed
 // static esp_err_t api_wifi_handler(httpd_req_t *req) { ... }
 
-void webserver_start(void)
+void webserver_start(i2c_master_bus_handle_t i2c_bus)
 {
+    s_i2c_bus = i2c_bus;
     // Default servo angles to 90
     for (int i = 0; i < 4; i++) {
         s_stats.servo_angles[i] = 90.0f;
@@ -649,6 +763,7 @@ void webserver_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CONFIG_WEBSERVER_PORT;
     config.stack_size = 16384;
+    config.max_uri_handlers = 16;
 
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) {
@@ -704,6 +819,20 @@ void webserver_start(void)
         .handler  = api_oled_handler,
     };
     httpd_register_uri_handler(server, &uri_oled);
+
+    httpd_uri_t uri_slide = {
+        .uri      = "/api/slide",
+        .method   = HTTP_POST,
+        .handler  = api_slide_handler,
+    };
+    httpd_register_uri_handler(server, &uri_slide);
+
+    httpd_uri_t uri_i2c_scan = {
+        .uri      = "/api/i2c-scan",
+        .method   = HTTP_GET,
+        .handler  = api_i2c_scan_handler,
+    };
+    httpd_register_uri_handler(server, &uri_i2c_scan);
 
     // TODO: re-enable after C6 slave firmware
     // httpd_uri_t uri_wifi = { ... };
